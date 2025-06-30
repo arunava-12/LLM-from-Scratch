@@ -2,97 +2,108 @@ import os
 import lzma
 from tqdm import tqdm
 from multiprocessing import cpu_count
-import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor
 
-def process_file(args):
-    directory, filename, temp_output_file = args
-    file_path = os.path.join(directory, filename)
-    
+def extract_text_from_xz(file_path):
     try:
         with lzma.open(file_path, "rt", encoding="utf-8") as infile:
-            text = infile.read()
+            return infile.read()
     except Exception as e:
-        print(f"Error reading {file_path}: {e}")
+        print(f"[ERROR] Failed to read {file_path}: {e}")
+        return None
+
+def process_file(args):
+    directory, filename, temp_output_path = args
+    file_path = os.path.join(directory, filename)
+    text = extract_text_from_xz(file_path)
+
+    if text is None:
         return set()
-    
-    with open(temp_output_file, "w", encoding="utf-8") as outfile:
-        outfile.write(text)
-    
+
+    try:
+        with open(temp_output_path, "w", encoding="utf-8") as outfile:
+            outfile.write(text)
+    except Exception as e:
+        print(f"[ERROR] Failed to write {temp_output_path}: {e}")
+        return set()
+
     return set(text)
 
-def xz_files_in_dir(directory):
+def list_xz_files(directory):
     try:
-        all_files = os.listdir(directory)
+        return sorted([
+            f for f in os.listdir(directory)
+            if f.endswith(".xz") and os.path.isfile(os.path.join(directory, f))
+        ])
     except Exception as e:
-        print(f"Error listing directory {directory}: {e}")
+        print(f"[ERROR] Failed to list files in {directory}: {e}")
         return []
-    files = [f for f in all_files if f.endswith(".xz") and os.path.isfile(os.path.join(directory, f))]
-    return files
 
-def process_files_in_parallel(files, folder_path, output_file):
+def process_files(files, input_dir, output_file):
     vocab = set()
-    temp_dir = output_file + "_temp"
+    temp_dir = output_file + "_tmp"
     os.makedirs(temp_dir, exist_ok=True)
-    
-    args = []
-    for filename in files:
-        temp_output_file = os.path.join(temp_dir, filename + ".txt")
-        args.append((folder_path, filename, temp_output_file))
-    
-    with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_count()) as executor:
-        for characters in tqdm(executor.map(process_file, args), total=len(files), desc=f"Processing {output_file}"):
-            vocab.update(characters)
-    
-    # Merge temp files into one output file
+
+    args = [
+        (input_dir, filename, os.path.join(temp_dir, filename + ".txt"))
+        for filename in files
+    ]
+
+    with ProcessPoolExecutor(max_workers=cpu_count()) as executor:
+        for char_set in tqdm(executor.map(process_file, args), total=len(files), desc=f"Processing {output_file}"):
+            vocab.update(char_set)
+
     with open(output_file, "w", encoding="utf-8") as outfile:
-        for filename in files:
-            temp_output_file = os.path.join(temp_dir, filename + ".txt")
+        for _, _, temp_output_path in args:
             try:
-                with open(temp_output_file, "r", encoding="utf-8") as infile:
+                with open(temp_output_path, "r", encoding="utf-8") as infile:
                     outfile.write(infile.read())
             except Exception as e:
-                print(f"Error reading temp file {temp_output_file}: {e}")
-    
-    # Clean up temp files and folder
+                print(f"[ERROR] Failed to merge {temp_output_path}: {e}")
+
     for f in os.listdir(temp_dir):
         os.remove(os.path.join(temp_dir, f))
     os.rmdir(temp_dir)
-    
+
     return vocab
 
-if __name__ == "__main__":
+def write_vocab_file(vocab, output_path):
+    try:
+        with open(output_path, "w", encoding="utf-8") as vfile:
+            for char in sorted(vocab):
+                vfile.write(char + "\n")
+    except Exception as e:
+        print(f"[ERROR] Could not write vocab file {output_path}: {e}")
+
+def main():
     folder_path = "openwebtext"
-    
-    print(f"Current working directory: {os.getcwd()}")
-    
-    files = xz_files_in_dir(folder_path)
-    print(f"Found {len(files)} .xz files in '{folder_path}':")
-    print(files)
-    
+    output_train = "output_train.txt"
+    output_val = "output_val.txt"
+    vocab_output = "vocab.txt"
+
+    print(f"[INFO] Scanning directory: {folder_path}")
+    files = list_xz_files(folder_path)
+
     if not files:
-        print("No .xz files found. Please check folder path and file extensions.")
-        exit(1)
-    
-    total_files = len(files)
-    split_index = int(total_files * 0.9)
-    files_train = files[:split_index]
-    files_val = files[split_index:]
-    
-    output_file_train = "output_train.txt"
-    output_file_val = "output_val.txt"
-    vocab_file = "vocab.txt"
-    
-    print(f"Processing {len(files_train)} training files...")
-    vocab_train = process_files_in_parallel(files_train, folder_path, output_file_train)
-    
-    print(f"Processing {len(files_val)} validation files...")
-    vocab_val = process_files_in_parallel(files_val, folder_path, output_file_val)
-    
-    vocab = vocab_train.union(vocab_val)
-    
-    print(f"Writing vocabulary file '{vocab_file}' with {len(vocab)} unique characters.")
-    with open(vocab_file, "w", encoding="utf-8") as vfile:
-        for char in sorted(vocab):
-            vfile.write(char + '\n')
-    
-    print("Done.")
+        print("[ERROR] No .xz files found.")
+        return
+
+    print(f"[INFO] Found {len(files)} .xz files.")
+
+    split_idx = int(0.9 * len(files))
+    files_train, files_val = files[:split_idx], files[split_idx:]
+
+    print(f"[INFO] Processing {len(files_train)} training files...")
+    vocab_train = process_files(files_train, folder_path, output_train)
+
+    print(f"[INFO] Processing {len(files_val)} validation files...")
+    vocab_val = process_files(files_val, folder_path, output_val)
+
+    combined_vocab = vocab_train.union(vocab_val)
+    print(f"[INFO] Writing combined vocabulary of {len(combined_vocab)} unique characters.")
+    write_vocab_file(combined_vocab, vocab_output)
+
+    print("[INFO] Processing complete.")
+
+if __name__ == "__main__":
+    main()
