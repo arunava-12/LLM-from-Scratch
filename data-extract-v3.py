@@ -1,91 +1,104 @@
 import os
 import lzma
-from tqdm import tqdm
-import concurrent.futures
 import random
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import cpu_count
 
 def process_file(args):
+    """Extract text from a .xz file and return its unique characters."""
     directory, filename, output_file = args
     file_path = os.path.join(directory, filename)
+
     try:
         with lzma.open(file_path, "rt", encoding="utf-8") as infile:
             text = infile.read()
+
         with open(output_file, "a", encoding="utf-8") as outfile:
             outfile.write(text)
-        characters = set(text)
-        return characters
+
+        return set(text)
+
     except Exception as e:
-        print(f"Error processing {filename}: {e}")
+        print(f"[ERROR] Failed to process {filename}: {e}")
         return set()
 
 def xz_files_in_dir(directory):
+    """List all .xz files in a directory."""
     try:
-        return [filename for filename in os.listdir(directory)
-                if filename.endswith(".xz") and os.path.isfile(os.path.join(directory, filename))]
+        return sorted([
+            f for f in os.listdir(directory)
+            if f.endswith(".xz") and os.path.isfile(os.path.join(directory, f))
+        ])
     except FileNotFoundError:
-        print(f"Directory '{directory}' not found.")
+        print(f"[ERROR] Directory '{directory}' not found.")
         return []
 
 def process_files_in_parallel(files, folder_path, output_file):
+    """Process files in parallel and build a vocabulary set."""
     vocab = set()
     if not files:
-        print(f"No files to process for output: {output_file}")
+        print(f"[WARNING] No files to process for output: {output_file}")
         return vocab
-    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
-        args = [(folder_path, filename, output_file) for filename in files]
-        for characters in tqdm(executor.map(process_file, args), total=len(files)):
+
+    args = [(folder_path, filename, output_file) for filename in files]
+
+    with ProcessPoolExecutor(max_workers=cpu_count()) as executor:
+        for characters in tqdm(executor.map(process_file, args), total=len(files), desc=f"Processing {output_file}"):
             vocab.update(characters)
+
     return vocab
 
 def safe_sample(files, sample_rate):
-    if not files:
+    """Safely sample a subset of files based on the sample rate."""
+    if not files or sample_rate <= 0:
         return []
-    return random.sample(files, min(len(files), max(1, int(len(files) * sample_rate))))
+    return random.sample(files, max(1, int(len(files) * sample_rate)))
 
-# ---- Configuration ----
-folder_path = "openwebtext"
-output_file_train = "output_train.txt"
-output_file_val = "output_val.txt"
-vocab_file = "vocab.txt"
-sample_rate = 0.01
+# ---------------- CONFIG ----------------
+FOLDER_PATH = "openwebtext"
+OUTPUT_TRAIN = "output_train.txt"
+OUTPUT_VAL = "output_val.txt"
+VOCAB_FILE = "vocab.txt"
+SAMPLE_RATE = 0.01
 
-# ---- Check folder exists ----
-if not os.path.isdir(folder_path):
-    print(f"Directory '{folder_path}' does not exist. Please check the path.")
+# ----------- MAIN LOGIC ---------------
+if not os.path.isdir(FOLDER_PATH):
+    print(f"[ERROR] Directory '{FOLDER_PATH}' does not exist.")
     exit(1)
 
-# ---- Get all .xz files ----
-files = xz_files_in_dir(folder_path)
+files = xz_files_in_dir(FOLDER_PATH)
 total_files = len(files)
-print(f"Total .xz files found: {total_files}")
+print(f"[INFO] Found {total_files} .xz files.")
 
 if total_files == 0:
-    print("No .xz files found in the directory. Exiting.")
+    print("[INFO] No files to process. Exiting.")
     exit(1)
 
-# ---- Train/Val split ----
+# Train/Val split
 split_index = int(total_files * 0.9)
 files_train = files[:split_index]
 files_val = files[split_index:]
-print(f"Train files: {len(files_train)}, Val files: {len(files_val)}")
+print(f"[INFO] Train files: {len(files_train)}, Val files: {len(files_val)}")
 
-# ---- Sample files safely ----
-files_train_sampled = safe_sample(files_train, sample_rate)
-files_val_sampled = safe_sample(files_val, sample_rate)
-print(f"Sampled Train files: {len(files_train_sampled)}, Sampled Val files: {len(files_val_sampled)}")
+# Sampling
+files_train_sampled = safe_sample(files_train, SAMPLE_RATE)
+files_val_sampled = safe_sample(files_val, SAMPLE_RATE)
+print(f"[INFO] Sampled Train files: {len(files_train_sampled)}, Sampled Val files: {len(files_val_sampled)}")
 
-# ---- Ensure output files are empty before appending ----
-open(output_file_train, 'w').close()
-open(output_file_val, 'w').close()
+# Clear previous outputs
+for path in [OUTPUT_TRAIN, OUTPUT_VAL]:
+    with open(path, 'w', encoding='utf-8'):
+        pass
 
-# ---- Process files ----
-vocab_train = process_files_in_parallel(files_train_sampled, folder_path, output_file_train)
-vocab_val = process_files_in_parallel(files_val_sampled, folder_path, output_file_val)
-
-# ---- Combine and write vocabulary ----
+# Process and collect vocab
+vocab_train = process_files_in_parallel(files_train_sampled, FOLDER_PATH, OUTPUT_TRAIN)
+vocab_val = process_files_in_parallel(files_val_sampled, FOLDER_PATH, OUTPUT_VAL)
 vocab = vocab_train.union(vocab_val)
-with open(vocab_file, "w", encoding="utf-8") as vfile:
+
+# Write vocabulary
+with open(VOCAB_FILE, "w", encoding="utf-8") as vfile:
     for char in sorted(vocab):
         vfile.write(char + '\n')
 
-print("Processing complete.")
+print(f"[INFO] Processing complete. Vocabulary saved to '{VOCAB_FILE}'")
