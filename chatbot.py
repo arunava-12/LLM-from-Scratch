@@ -191,8 +191,6 @@ with open('model-01.pkl', 'rb') as f:
 print('loaded successfully!')
 m = model.to(device)
 
-
-
 while True:
     prompt = input("Prompt:\n")
     context = torch.tensor(encode(prompt), dtype=torch.long, device=device)
